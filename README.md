@@ -13,8 +13,8 @@ This smart contract implements a decentralized crowdfunding platform where users
 ### Steps
 1. Clone the repository:
    ```sh
-   git clone <repo-url>
-   cd crowdfunding-dao
+   git clone https://github.com/Manufg07/DAO-Crowdfunding.git
+   cd hardhat
    ```
 2. Install dependencies:
    ```sh
