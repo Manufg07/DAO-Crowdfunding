@@ -1,4 +1,5 @@
 const { network, ethers } = require("hardhat");
+const { assert } = require("chai");
 
 async function moveBlocks(number) {
   for (let index = 0; index < number; index++) {
@@ -15,163 +16,126 @@ async function moveTime(number) {
   console.log(`Moved forward in time ${number} seconds`);
 }
 
-describe("Crowdfunding Platform Testing Flow", function () {
-  it("Proposal to Executed Flow", async function () {
-    /* ------------ Get Deployer's Address/Identity -------------*/
-    const [deployer, backer1, backer2] = await ethers.getSigners();
+describe("Crowdfunding DAO Testing Flow", function () {
+  it("Full Proposal to Execution Flow", async function () {
+    const [deployer] = await ethers.getSigners();
 
     /* ------------ Deployment -------------*/
-    // Deploy GovToken (no arguments)
-    const GovToken = await ethers.deployContract("GovToken");
-
-    // Deploy TimeLock
+    const GovToken = await ethers.deployContract("GovToken", [deployer]);
     const TimeLock = await ethers.deployContract("TimeLock", [
-      0, // Min delay
-      [deployer.address], // Proposers
-      [deployer.address], // Executors
-      deployer.address, // Admin
-    ]);
-
-    // Deploy Crowdfund (with initialOwner argument)
-    const Crowdfund = await ethers.deployContract("Crowdfund", [
+      0,
+      [deployer.address],
+      [deployer.address],
       deployer.address,
     ]);
-
-    // Transfer Crowdfund ownership to TimeLock
-    await Crowdfund.connect(deployer).transferOwnership(TimeLock.target);
-
-    // Deploy CrowdfundGovernor
-    const CrowdfundGovernor = await ethers.deployContract("CrowdfundGovernor", [
+    const CrowdFund = await ethers.deployContract("CrowdFund", [
+      TimeLock.target,
+    ]);
+    const MyGovernor = await ethers.deployContract("MyGovernor", [
       GovToken.target,
       TimeLock.target,
     ]);
 
-    console.log("TimeLock: ", TimeLock.target);
-    console.log("Crowdfund: ", Crowdfund.target);
-    console.log("CrowdfundGovernor: ", CrowdfundGovernor.target);
-    console.log("GovToken: ", GovToken.target);
+    console.log("Contracts deployed:");
+    console.log("TimeLock:", TimeLock.target);
+    console.log("CrowdFund:", CrowdFund.target);
+    console.log("MyGovernor:", MyGovernor.target);
+    console.log("GovToken:", GovToken.target);
 
-    /* ------------ Balance and Voting Power -------------*/
-    // Mint tokens to deployer and backers
-    await GovToken.mint(deployer.address, ethers.parseEther("1000"));
-    await GovToken.mint(backer1.address, ethers.parseEther("100"));
-    await GovToken.mint(backer2.address, ethers.parseEther("100"));
+    /* ------------ Voting Power Setup -------------*/
+    await GovToken.delegate(deployer.address);
+    const votes = await GovToken.getVotes(deployer.address);
+    console.log(`Delegated votes: ${votes}`);
 
-    // Delegate voting power
-    await GovToken.connect(deployer).delegate(deployer.address);
-    await GovToken.connect(backer1).delegate(backer1.address);
-    await GovToken.connect(backer2).delegate(backer2.address);
-
-    let votes = await GovToken.getVotes(deployer.address);
-    console.log(`Votes for deployer: ${votes}`);
-
-    /* ------------ Assign Roles to Governor Contract -------------*/
+    /* ------------ Role Assignment -------------*/
     const PROPOSER_ROLE = await TimeLock.PROPOSER_ROLE();
     const EXECUTOR_ROLE = await TimeLock.EXECUTOR_ROLE();
+    await TimeLock.grantRole(PROPOSER_ROLE, MyGovernor.target);
+    await TimeLock.grantRole(EXECUTOR_ROLE, MyGovernor.target);
 
-    await TimeLock.connect(deployer).grantRole(
-      PROPOSER_ROLE,
-      CrowdfundGovernor.target
-    );
-    await TimeLock.connect(deployer).grantRole(
-      EXECUTOR_ROLE,
-      CrowdfundGovernor.target
-    );
+    /* ------------ Create Project Proposal -------------*/
+    const projectId = 1;
+    const goal = ethers.parseEther("10"); // 10 ETH
+    const durationDays = 30;
 
-    /* ------------ Create a Campaign -------------*/
-    await Crowdfund.connect(deployer).createCampaign(
-      "Decentralized Social Media",
-      "A new social media platform built on blockchain.",
-      ethers.parseEther("10") // Goal: 10 ETH
+    const createProjectCalldata = CrowdFund.interface.encodeFunctionData(
+      "createProject",
+      [projectId, deployer.address, goal, durationDays]
     );
 
-    const campaignId = 1; // First campaign has ID 1
-    console.log(`Campaign ID: ${campaignId}`);
-
-    /* ------------ Proposal to Approve Campaign -------------*/
-    const approveCalldata = Crowdfund.interface.encodeFunctionData(
-      "approveCampaign",
-      [campaignId]
+    const proposeTx = await MyGovernor.propose(
+      [CrowdFund.target],
+      [0],
+      [createProjectCalldata],
+      "Proposal #1: Create New Project"
     );
-
-    const proposeTx = await CrowdfundGovernor.propose(
-      [Crowdfund.target], // Targets
-      [0], // Values
-      [approveCalldata], // Calldata
-      "Proposal #1: Approve Campaign #1"
+    const receipt = await proposeTx.wait();
+    const event = receipt.logs.find(
+      (x) => x.fragment.name === "ProposalCreated"
     );
-    await proposeTx.wait();
+    const proposalId = event.args.proposalId;
+    console.log(`Proposal ID: ${proposalId}`);
 
-    const filter = CrowdfundGovernor.filters.ProposalCreated();
-    const events = await CrowdfundGovernor.queryFilter(
-      filter,
-      proposeTx.blockNumber,
-      proposeTx.blockNumber
-    );
-    const proposalId = events[0].args.proposalId;
+    /* ------------ Voting Phase -------------*/
+    // Move just past voting delay (10 blocks)
+    await moveBlocks(10 + 1);
 
-    console.log(`Proposal ID Generated: ${proposalId}`);
+    let state = await MyGovernor.state(proposalId);
+    console.log(`Proposal state after delay: ${state}`); // Should be Active (1)
 
-    /* ------------ #0 Pending -------------*/
-    let proposalState = await CrowdfundGovernor.state(proposalId);
-    console.log(`Current Proposal State: ${proposalState}`);
-
-    await moveBlocks(1); // Move past voting delay
-
-    /* ------------ #1 Active = Voting -------------*/
-    proposalState = await CrowdfundGovernor.state(proposalId);
-    console.log(`Current Proposal State: ${proposalState}`);
-
-    // Deployer votes FOR the proposal
-    const voteTx = await CrowdfundGovernor.castVoteWithReason(
+    // Cast vote during active period
+    const voteTx = await MyGovernor.castVoteWithReason(
       proposalId,
       1,
-      "I support this campaign"
+      "Approving project"
     );
-    await voteTx.wait(1);
+    await voteTx.wait();
 
-    const proposalVotes = await CrowdfundGovernor.proposalVotes(proposalId);
-    console.log("Against Votes:", proposalVotes.againstVotes.toString());
-    console.log("For Votes:", proposalVotes.forVotes.toString());
-    console.log("Abstain Votes:", proposalVotes.abstainVotes.toString());
+    // Move past voting period (10 blocks)
+    await moveBlocks(10 + 1);
 
-    await moveBlocks(100); // Move past voting period
+    state = await MyGovernor.state(proposalId);
+    console.log(`Proposal state after voting: ${state}`); // Should be Succeeded (4)
+    /* ------------ Queue & Execute -------------*/
+    const descriptionHash = ethers.id("Proposal #1: Create New Project");
 
-    /* ------------ #4 Succeeded -------------*/
-    proposalState = await CrowdfundGovernor.state(proposalId);
-    console.log(`Current Proposal State: ${proposalState}`);
-
-    /* ------------ #5 Queued -------------*/
-    const descriptionHash = ethers.id("Proposal #1: Approve Campaign #1");
-
-    const queueTx = await CrowdfundGovernor.queue(
-      [Crowdfund.target],
+    // Queue
+    const queueTx = await MyGovernor.queue(
+      [CrowdFund.target],
       [0],
-      [approveCalldata],
+      [createProjectCalldata],
       descriptionHash
     );
-    await queueTx.wait(1);
+    await queueTx.wait();
 
-    proposalState = await CrowdfundGovernor.state(proposalId);
-    console.log(`Current Proposal State: ${proposalState}`);
-
-    await moveTime(40); // Move past timelock delay
+    await moveTime(86400); // 1 day delay
     await moveBlocks(1);
 
-    /* ------------ #7 Execute -------------*/
-    const executeTx = await CrowdfundGovernor.execute(
-      [Crowdfund.target],
+    // Execute
+    const executeTx = await MyGovernor.execute(
+      [CrowdFund.target],
       [0],
-      [approveCalldata],
+      [createProjectCalldata],
       descriptionHash
     );
-    await executeTx.wait(1);
+    await executeTx.wait();
 
-    proposalState = await CrowdfundGovernor.state(proposalId);
-    console.log(`Current Proposal State: ${proposalState}`);
+    /* ------------ Verification -------------*/
+    const finalState = await MyGovernor.state(proposalId);
+    console.log(`Final proposal state: ${finalState}`);
 
-    /* ------------ Verify Campaign Approval -------------*/
-    const campaign = await Crowdfund.campaigns(campaignId);
-    console.log("Campaign Approved:", campaign.isApproved);
+    // Check project creation
+    const project = await CrowdFund.projects(projectId);
+    console.log("Project details:", {
+      owner: project.owner,
+      goal: ethers.formatEther(project.goal), // Convert to readable ETH
+      deadline: new Date(Number(project.deadline) * 1000), // Proper BigInt conversion
+      approved: project.approved,
+    });
+
+    // Verify project was created correctly
+    assert.equal(project.owner, deployer.address);
+    assert.equal(project.goal.toString(), goal.toString()); // Compare string representations
+    assert.isTrue(project.approved);
   });
 });

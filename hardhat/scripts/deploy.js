@@ -1,50 +1,69 @@
+// deploy.js
 const { ethers } = require("hardhat");
+const fs = require("fs");
 
 async function main() {
+  // Get the deployer's account
   const [deployer] = await ethers.getSigners();
 
-  console.log("Deploying contracts with the account:", deployer.address);
+  console.log(`Deploying contracts with the account: ${deployer.address}`);
 
-  // Deploy GovToken
-  const GovToken = await ethers.deployContract("GovToken");
-  await GovToken.waitForDeployment();
-  console.log("GovToken deployed to:", GovToken.target);
+  // Deploy the GovToken contract
+  const govToken = await ethers.deployContract("GovToken", [deployer.address]);
+  await govToken.waitForDeployment();
+  console.log(`GovToken deployed to: ${govToken.target}`);
 
-  // Deploy TimeLock
-  const TimeLock = await ethers.deployContract("TimeLock", [
-    0, // Min delay
-    [deployer.address], // Proposers
-    [deployer.address], // Executors
-    deployer.address, // Admin
+  // Deploy the TimeLock contract
+  const timeLock = await ethers.deployContract("TimeLock", [
+    0, // min delay
+    [deployer.address], // proposers
+    [deployer.address], // executors
+    deployer.address, // admin
   ]);
-  await TimeLock.waitForDeployment();
-  console.log("TimeLock deployed to:", TimeLock.target);
+  await timeLock.waitForDeployment();
+  console.log(`TimeLock deployed to: ${timeLock.target}`);
 
-  // Deploy Crowdfund
-  const Crowdfund = await ethers.deployContract("Crowdfund", [
-    deployer.address,
+  // Deploy the CrowdFund contract (replacing Cert)
+  const crowdFund = await ethers.deployContract("CrowdFund", [timeLock.target]);
+  await crowdFund.waitForDeployment();
+  console.log(`CrowdFund deployed to: ${crowdFund.target}`);
+
+  // Deploy the MyGovernor contract
+  const myGovernor = await ethers.deployContract("MyGovernor", [
+    govToken.target,
+    timeLock.target,
   ]);
-  await Crowdfund.waitForDeployment();
-  console.log("Crowdfund deployed to:", Crowdfund.target);
+  await myGovernor.waitForDeployment();
+  console.log(`MyGovernor deployed to: ${myGovernor.target}`);
 
-  // Deploy CrowdfundGovernor
-  const CrowdfundGovernor = await ethers.deployContract("CrowdfundGovernor", [
-    GovToken.target,
-    TimeLock.target,
-  ]);
-  await CrowdfundGovernor.waitForDeployment();
-  console.log("CrowdfundGovernor deployed to:", CrowdfundGovernor.target);
+  // Delegate votes to the deployer
+  const transactionResponse = await govToken.delegate(deployer.address);
+  await transactionResponse.wait(1);
 
-  // Assign roles to Governor
-  const PROPOSER_ROLE = await TimeLock.PROPOSER_ROLE();
-  const EXECUTOR_ROLE = await TimeLock.EXECUTOR_ROLE();
+  // Setup TimeLock roles
+  const PROPOSER_ROLE = await timeLock.PROPOSER_ROLE();
+  const EXECUTOR_ROLE = await timeLock.EXECUTOR_ROLE();
 
-  await TimeLock.grantRole(PROPOSER_ROLE, CrowdfundGovernor.target);
-  await TimeLock.grantRole(EXECUTOR_ROLE, CrowdfundGovernor.target);
+  // Grant roles to Governor
+  await timeLock.connect(deployer).grantRole(PROPOSER_ROLE, myGovernor.target);
+  await timeLock.connect(deployer).grantRole(EXECUTOR_ROLE, myGovernor.target);
 
-  console.log("Roles assigned to CrowdfundGovernor");
+  // Save the contract addresses
+  saveAddresses({
+    GovToken: govToken.target,
+    TimeLock: timeLock.target,
+    CrowdFund: crowdFund.target, // Changed from Cert
+    MyGovernor: myGovernor.target,
+  });
 }
 
+function saveAddresses(addresses) {
+  const filePath = "./deployedAddresses.json";
+  fs.writeFileSync(filePath, JSON.stringify(addresses, null, 2));
+  console.log(`Contract addresses saved to ${filePath}`);
+}
+
+// Execute the main function
 main()
   .then(() => process.exit(0))
   .catch((error) => {
